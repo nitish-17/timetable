@@ -4,28 +4,27 @@ import { VitePWA } from 'vite-plugin-pwa'
 
 // https://vite.dev/config/
 export default defineConfig({
+  base: "/timetable/",
   plugins: [
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.ico', 'robots.txt'],
+      includeAssets: ['favicon.svg', 'robots.txt'],
       manifest: {
         name: 'School Timetable Generator',
         short_name: 'Timetable',
         description: 'High-density Google Antigravity-style school timetable scheduler',
-        theme_color: '#ffffff',
+        theme_color: '#1a73e8',
         background_color: '#ffffff',
         display: 'standalone',
+        start_url: '/timetable/',
+        scope: '/timetable/',
         icons: [
           {
-            src: 'pwa-192x192.png',
-            sizes: '192x192',
-            type: 'image/png'
-          },
-          {
-            src: 'pwa-512x512.png',
-            sizes: '512x512',
-            type: 'image/png'
+            src: 'favicon.svg',
+            sizes: '192x192 512x512 any',
+            type: 'image/svg+xml',
+            purpose: 'any maskable'
           }
         ]
       },

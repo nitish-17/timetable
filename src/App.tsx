@@ -617,7 +617,7 @@ export default function App() {
       <header className="header-bar">
         <div className="header-title">
           <Calendar size={16} />
-          <span>Antigravity Timetable Scheduler</span>
+          <span>Timetable</span>
         </div>
 
         <nav className="tab-nav">
