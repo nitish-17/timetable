@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <rect width="512" height="512" rx="112" fill="#1a73e8"/>
+  
+  <!-- Grid columns and headers representation -->
+  <!-- Top header row representing days/periods -->
+  <rect x="64" y="70" width="384" height="60" rx="12" fill="#ffffff" fill-opacity="0.3"/>
+  
+  <!-- Left-most column representing days header -->
+  <rect x="64" y="150" width="80" height="290" rx="12" fill="#ffffff" fill-opacity="0.2"/>
+  
+  <!-- Timetable Grid Cells -->
+  <!-- Row 1 -->
+  <rect x="160" y="150" width="84" height="84" rx="14" fill="#ffffff"/>
+  <rect x="260" y="150" width="84" height="84" rx="14" fill="#ffffff" fill-opacity="0.5"/>
+  <rect x="360" y="150" width="84" height="84" rx="14" fill="#ffffff" fill-opacity="0.8"/>
+  
+  <!-- Row 2 -->
+  <rect x="160" y="250" width="84" height="84" rx="14" fill="#ffffff" fill-opacity="0.5"/>
+  <rect x="260" y="250" width="84" height="84" rx="14" fill="#ffffff" fill-opacity="0.8"/>
+  <rect x="360" y="250" width="84" height="84" rx="14" fill="#ffffff"/>
+  
+  <!-- Row 3 -->
+  <rect x="160" y="350" width="84" height="84" rx="14" fill="#ffffff" fill-opacity="0.8"/>
+  <rect x="260" y="350" width="84" height="84" rx="14" fill="#ffffff"/>
+  <rect x="360" y="350" width="84" height="84" rx="14" fill="#ffffff" fill-opacity="0.5"/>
+</svg>
