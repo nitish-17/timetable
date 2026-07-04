@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
-  Calendar, Download, Upload, Trash2, Plus, Save, Printer, RotateCcw
+  Calendar, Download, Upload, Trash2, Plus, Save, Printer, RotateCcw, Pencil, Check, X,
+  ChevronDown, ChevronRight
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { useStore } from './store';
-import { ResizableDivider } from './components/ResizableDivider';
-import { db, type Teacher } from './db';
+import { db, type Teacher, type TimetableSlot } from './db';
 
 type Tab = 'scheduler' | 'presets' | 'teachers' | 'config';
 
@@ -30,19 +30,49 @@ export default function App() {
     applyPresetToSection,
     savePreset,
     deletePreset,
+    addSubject,
+    updateSubject,
+    deleteSubject,
+    getDeleteSubjectImpact,
     saveTeacher,
     deleteTeacher,
     setSelectedClassSection,
     setSelectedTeacherId,
-    resetAllData
+    resetAllData,
+    autoSuggestTeacherSlots,
+    bulkAssignSlots
   } = useStore();
 
 
   const [activeTab, setActiveTab] = useState<Tab>('scheduler');
 
-  // Panel widths for dual-view scheduler
-  const [leftPanelWidth, setLeftPanelWidth] = useState<number>(window.innerWidth / 2);
-  const [isDraggingSplitter, setIsDraggingSplitter] = useState<boolean>(false);
+  // Collapsible panels state for scheduler
+  const [collapsedSections, setCollapsedSections] = useState<string[]>([]);
+  const [visibleClassSections, setVisibleClassSections] = useState<string[]>([]);
+  const [isTeacherTimetableCollapsed, setIsTeacherTimetableCollapsed] = useState<boolean>(false);
+
+  // Auto-Fill States
+  const [suggestedSlots, setSuggestedSlots] = useState<TimetableSlot[] | null>(null);
+
+  // Sync visibleClassSections when selectedClassSection is loaded/updated
+  useEffect(() => {
+    if (selectedClassSection && !visibleClassSections.includes(selectedClassSection)) {
+      setVisibleClassSections(prev => {
+        if (prev.includes(selectedClassSection)) return prev;
+        return [...prev, selectedClassSection];
+      });
+    }
+  }, [selectedClassSection]);
+
+  const handleRemoveClassSectionTable = (cs: string) => {
+    setVisibleClassSections(prev => {
+      const updated = prev.filter(item => item !== cs);
+      if (selectedClassSection === cs) {
+        setSelectedClassSection(updated[0] || null);
+      }
+      return updated;
+    });
+  };
 
   // Form states
   const [obClasses, setObClasses] = useState<number>(5);
@@ -67,7 +97,7 @@ export default function App() {
   const [tMaxLoad, setTMaxLoad] = useState<number>(25);
 
   // Grid Cell Interaction (Active Cell for Popover Selection)
-  const [activeCellSlot, setActiveCellSlot] = useState<{ day: number; period: number } | null>(null);
+  const [activeCellSlot, setActiveCellSlot] = useState<{ classSection: string; day: number; period: number } | null>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
 
   // File Upload Ref
@@ -75,6 +105,12 @@ export default function App() {
 
   // Developer test states
   const [testTeachersCount, setTestTeachersCount] = useState<number>(10);
+
+  // Subject Management states
+  const [newSubjectName, setNewSubjectName] = useState<string>('');
+  const [editingSubjectId, setEditingSubjectId] = useState<string | null>(null);
+  const [editingSubjectName, setEditingSubjectName] = useState<string>('');
+  const [deleteSubjectConfirm, setDeleteSubjectConfirm] = useState<string | null>(null);
 
 
   useEffect(() => {
@@ -137,55 +173,11 @@ export default function App() {
   }, [schoolConfig]);
 
   // Active Timetable computations for selected class
-  const activeClassTimetable = useMemo(() => {
-    if (!selectedClassSection) return {};
-    const filtered: Record<string, typeof timetable[string]> = {};
-    Object.values(timetable).forEach(slot => {
-      if (slot.classSection === selectedClassSection) {
-        filtered[`${slot.dayIndex}-${slot.periodIndex}`] = slot;
-      }
-    });
-    return filtered;
-  }, [timetable, selectedClassSection]);
-
   // Total Target Slots per Section
   const targetSlotsTotal = useMemo(() => {
     if (!schoolConfig) return 0;
     return schoolConfig.daysPerWeek * schoolConfig.periodsPerDay;
   }, [schoolConfig]);
-
-  // Requirements status for selected Class-Section
-  const activeClassRequirements = useMemo(() => {
-    if (!selectedClassSection) return null;
-    const req = sectionRequirements.find(r => r.classSection === selectedClassSection);
-    
-    // Default allocations if no custom configuration exists
-    const allocations = req ? req.allocations : {};
-    const enabled = req ? req.enabledSubjects : [];
-
-    const subjectsStatus = subjects.map(sub => {
-      const isEnabled = enabled.includes(sub.id);
-      const target = isEnabled ? (allocations[sub.id] || 0) : 0;
-      const allocated = (classSubjectLoads[selectedClassSection] || {})[sub.id] || 0;
-      return {
-        ...sub,
-        isEnabled,
-        target,
-        allocated,
-        difference: target - allocated
-      };
-    });
-
-    const totalAllocated = Object.values(classSubjectLoads[selectedClassSection] || {}).reduce((a, b) => a + b, 0);
-    const totalTarget = subjectsStatus.reduce((acc, s) => acc + s.target, 0);
-
-    return {
-      subjectsStatus,
-      totalAllocated,
-      totalTarget,
-      isConfigured: !!req
-    };
-  }, [selectedClassSection, sectionRequirements, subjects, classSubjectLoads]);
 
   // Active Teacher Requirements status
   const activeTeacherStatus = useMemo(() => {
@@ -224,14 +216,7 @@ export default function App() {
     });
   };
 
-  // Resize Left Panel Handler
-  const handleDividerResize = (clientX: number) => {
-    // Ensure panels are bounded
-    const minWidth = 300;
-    const maxWidth = window.innerWidth - 300;
-    const newWidth = Math.max(minWidth, Math.min(maxWidth, clientX));
-    setLeftPanelWidth(newWidth);
-  };
+
 
   // Save Preset Actions
   const handleSavePreset = () => {
@@ -513,18 +498,18 @@ export default function App() {
   };
 
   // Eligible teachers selector for selected cell
-  const getEligibleTeachersForCell = (day: number, period: number) => {
-    if (!selectedClassSection) return [];
+  const getEligibleTeachersForCell = (classSection: string, day: number, period: number) => {
+    if (!classSection) return [];
     
     // We filter teachers that:
     // 1. Are configured to teach this class section or are allowed to teach all classes
     // 2. Teach the subjects enabled for this class
-    const req = sectionRequirements.find(r => r.classSection === selectedClassSection);
+    const req = sectionRequirements.find(r => r.classSection === classSection);
     const enabledSubIds = req ? req.enabledSubjects : [];
 
     return teachers.filter(t => {
       // Verify Class limits
-      const isAllowedClass = t.classes.length === 0 || t.classes.includes(selectedClassSection);
+      const isAllowedClass = t.classes.length === 0 || t.classes.includes(classSection);
       if (!isAllowedClass) return false;
 
       // Verify subject eligibility
@@ -533,7 +518,7 @@ export default function App() {
     }).map(t => {
       // Identify active double bookings
       const busySlots = Object.values(timetable).filter(
-        slot => slot.teacherId === t.id && slot.dayIndex === day && slot.periodIndex === period && slot.classSection !== selectedClassSection
+        slot => slot.teacherId === t.id && slot.dayIndex === day && slot.periodIndex === period && slot.classSection !== classSection
       );
       return {
         ...t,
@@ -631,7 +616,7 @@ export default function App() {
             className={`tab-btn ${activeTab === 'presets' ? 'active' : ''}`}
             onClick={() => setActiveTab('presets')}
           >
-            Presets
+            Subjects & Presets
           </button>
           <button 
             className={`tab-btn ${activeTab === 'teachers' ? 'active' : ''}`}
@@ -673,144 +658,352 @@ export default function App() {
         {/* TAB 1: SCHEDULER VIEW */}
         {activeTab === 'scheduler' && (
           <div className="scheduler-workspace">
-            {/* Left Panel: Class View */}
-            <div 
-              className="scheduler-panel" 
-              style={{ width: `${leftPanelWidth}px` }}
-            >
-              <div className="panel-header">
-                <div className="panel-title-row">
-                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                    <h3 style={{ fontSize: '13px', fontWeight: 500 }}>Class Section Timetable</h3>
-                    <select 
-                      value={selectedClassSection || ''} 
-                      onChange={e => setSelectedClassSection(e.target.value)}
-                      style={{ padding: '2px 4px' }}
-                    >
-                      {allClassSectionsList.map(cs => (
-                        <option key={cs} value={cs}>Class {cs}</option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <button 
-                    onClick={() => {
-                      if (confirm(`Are you sure you want to clear the timetable for Section ${selectedClassSection}?`)) {
-                        allClassSectionsList.forEach(cs => {
-                          if (cs === selectedClassSection) {
-                            for (let d = 0; d < schoolConfig.daysPerWeek; d++) {
-                              for (let p = 0; p < schoolConfig.periodsPerDay; p++) {
-                                clearSlot(cs, d, p);
-                              }
-                            }
-                          }
-                        });
-                      }
+            {suggestedSlots && (
+              <div style={{
+                backgroundColor: 'var(--google-yellow-light)',
+                border: '1px solid var(--google-yellow)',
+                padding: '10px 16px',
+                borderRadius: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexShrink: 0
+              }}>
+                <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--google-text-primary)' }}>
+                  Showing {suggestedSlots.length} suggested assignments for the selected teacher.
+                </span>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button
+                    onClick={async () => {
+                      await bulkAssignSlots(suggestedSlots);
+                      setSuggestedSlots(null);
                     }}
-                    style={{ padding: '2px 6px', color: 'var(--google-red-error)' }}
-                    title="Clear current class timetable"
+                    style={{ backgroundColor: 'var(--google-blue)', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', fontSize: '12px', fontWeight: 500, cursor: 'pointer' }}
                   >
-                    Clear Slots
+                    Keep Assignments
+                  </button>
+                  <button
+                    onClick={() => setSuggestedSlots(null)}
+                    style={{ backgroundColor: 'transparent', border: '1px solid var(--google-gray-border)', padding: '6px 12px', borderRadius: '4px', fontSize: '12px', fontWeight: 500, cursor: 'pointer' }}
+                  >
+                    Discard
                   </button>
                 </div>
-
-                {/* Constraint status indicator */}
-                {activeClassRequirements && (
-                  <div style={{ 
-                    border: '1px solid var(--google-gray-border)', 
-                    borderRadius: '4px', 
-                    padding: '4px 8px', 
-                    backgroundColor: 'var(--google-gray-bg)',
-                    fontSize: '11px'
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
-                      <span style={{ fontWeight: 500 }}>Subject Requirements:</span>
-                      <span className={`status-pill ${activeClassRequirements.totalAllocated === activeClassRequirements.totalTarget ? 'success' : 'warn'}`}>
-                        Allocated: {activeClassRequirements.totalAllocated} / {activeClassRequirements.totalTarget} periods
-                      </span>
-                    </div>
-                    
-                    {/* Compact list of subjects & details */}
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                      {activeClassRequirements.subjectsStatus.filter(s => s.isEnabled).map(s => (
-                        <span 
-                          key={s.id} 
-                          style={{ 
-                            padding: '1px 4px', 
-                            borderRadius: '3px',
-                            border: '1px solid var(--google-gray-border)',
-                            backgroundColor: s.difference === 0 ? 'var(--google-green-bg)' : (s.difference < 0 ? 'var(--google-red-bg)' : 'var(--google-gray-card)'),
-                            color: s.difference === 0 ? 'var(--google-green-success)' : (s.difference < 0 ? 'var(--google-red-error)' : 'var(--google-text-secondary)'),
-                            fontSize: '9px'
-                          }}
-                        >
-                          {s.name}: {s.allocated}/{s.target}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
               </div>
+            )}
 
-              {/* Grid table */}
-              <div className="panel-grid-container">
-                <div className="table-container">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th style={{ width: '80px' }}>Day</th>
-                        {periodsList.map((p, idx) => (
-                          <th key={idx}>{p}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {daysList.map((day, dIdx) => (
-                        <tr key={dIdx}>
-                          <td style={{ fontWeight: 500, backgroundColor: 'var(--google-gray-bg)' }}>{day}</td>
-                          {periodsList.map((_, pIdx) => {
-                            const slot = activeClassTimetable[`${dIdx}-${pIdx}`];
-                            const isClashing = slot && clashingSlots.has(slot.id);
-                            const teacher = slot ? teachers.find(t => t.id === slot.teacherId) : null;
-                            const subject = slot ? subjects.find(s => s.id === slot.subjectId) : null;
-
-                            return (
-                              <td 
-                                key={pIdx} 
-                                className={`timetable-cell ${isClashing ? 'clashing' : ''}`}
-                                onClick={() => setActiveCellSlot({ day: dIdx, period: pIdx })}
-                              >
-                                {slot ? (
-                                  <div className="timetable-cell-content">
-                                    <span className="cell-teacher">{teacher?.shortName || slot.teacherId}</span>
-                                    <span className="cell-subject">{subject?.name || slot.subjectId}</span>
-                                  </div>
-                                ) : (
-                                  <div className="timetable-cell-content" style={{ color: '#ccc' }}>+</div>
-                                )}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+            {/* View Controls: Add/Remove Class Section Tables */}
+            <div style={{ 
+              display: 'flex', 
+              flexDirection: 'column',
+              gap: '6px',
+              backgroundColor: 'var(--google-gray-card)',
+              border: '1px solid var(--google-gray-border)',
+              borderRadius: '6px',
+              padding: '8px 12px',
+              flexShrink: 0
+            }}>
+              <span style={{ fontSize: '11px', fontWeight: 500, color: 'var(--google-text-secondary)' }}>
+                Visible Class Timetables:
+              </span>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                {allClassSectionsList.map(cs => {
+                  const isVisible = visibleClassSections.includes(cs);
+                  return (
+                    <button
+                      key={cs}
+                      type="button"
+                      onClick={() => {
+                        if (isVisible) {
+                          handleRemoveClassSectionTable(cs);
+                        } else {
+                          setVisibleClassSections(prev => [...prev, cs]);
+                          setSelectedClassSection(cs);
+                        }
+                      }}
+                      style={{
+                        padding: '2px 6px',
+                        fontSize: '10px',
+                        borderRadius: '12px',
+                        backgroundColor: isVisible ? 'var(--google-blue-light)' : 'var(--google-gray-bg)',
+                        color: isVisible ? 'var(--google-blue)' : 'var(--google-text-secondary)',
+                        borderColor: isVisible ? 'var(--google-blue)' : 'var(--google-gray-border)',
+                        fontWeight: isVisible ? 600 : 400,
+                        transition: 'all 0.15s'
+                      }}
+                    >
+                      {isVisible ? `✓ Class ${cs}` : `+ Class ${cs}`}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
-            {/* Splitter */}
-            <ResizableDivider 
-              onResize={handleDividerResize}
-              isDragging={isDraggingSplitter}
-              setIsDragging={setIsDraggingSplitter}
-            />
+            {/* List of Class Section Timetable Panels */}
+            {visibleClassSections.length > 0 ? (
+              visibleClassSections.map(cs => {
+                const isCollapsed = collapsedSections.includes(cs);
+
+                // Compute local active timetable for this class section
+                const classTimetable: Record<string, typeof timetable[string]> = {};
+                Object.values(timetable).forEach(slot => {
+                  if (slot.classSection === cs) {
+                    classTimetable[`${slot.dayIndex}-${slot.periodIndex}`] = slot;
+                  }
+                });
+
+                // Compute local requirements status for this class section
+                const req = sectionRequirements.find(r => r.classSection === cs);
+                const allocations = req ? req.allocations : {};
+                const enabled = req ? req.enabledSubjects : [];
+
+                const subjectsStatus = subjects.map(sub => {
+                  const isEnabled = enabled.includes(sub.id);
+                  const target = isEnabled ? (allocations[sub.id] || 0) : 0;
+                  const allocated = (classSubjectLoads[cs] || {})[sub.id] || 0;
+                  return {
+                    ...sub,
+                    isEnabled,
+                    target,
+                    allocated,
+                    difference: target - allocated
+                  };
+                });
+
+                const totalAllocated = Object.values(classSubjectLoads[cs] || {}).reduce((a, b) => a + b, 0);
+                const totalTarget = subjectsStatus.reduce((acc, s) => acc + s.target, 0);
+
+                const classRequirements = {
+                  subjectsStatus,
+                  totalAllocated,
+                  totalTarget,
+                  isConfigured: !!req
+                };
+
+                return (
+                  <div key={cs} className="scheduler-panel">
+                    <div className="panel-header">
+                      <div className="panel-title-row">
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                          <button 
+                            type="button"
+                            onClick={() => {
+                              setCollapsedSections(prev => 
+                                prev.includes(cs) ? prev.filter(item => item !== cs) : [...prev, cs]
+                              );
+                            }}
+                            style={{ 
+                              background: 'none', 
+                              border: 'none', 
+                              padding: '4px', 
+                              display: 'flex', 
+                              alignItems: 'center', 
+                              justifyContent: 'center',
+                              color: 'var(--google-text-secondary)',
+                              borderRadius: '50%'
+                            }}
+                            title={isCollapsed ? "Expand Class Section Timetable" : "Collapse Class Section Timetable"}
+                          >
+                            {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+                          </button>
+                          <h3 style={{ fontSize: '13px', fontWeight: 500 }}>Class Section Timetable</h3>
+                          <select 
+                            value={cs} 
+                            onChange={e => {
+                              const newCs = e.target.value;
+                              if (visibleClassSections.includes(newCs)) {
+                                setVisibleClassSections(prev => prev.filter(item => item !== cs));
+                              } else {
+                                setVisibleClassSections(prev => prev.map(item => item === cs ? newCs : item));
+                              }
+                              setSelectedClassSection(newCs);
+                            }}
+                            style={{ padding: '2px 4px' }}
+                          >
+                            {allClassSectionsList.map(item => (
+                              <option key={item} value={item} disabled={visibleClassSections.includes(item) && item !== cs}>
+                                Class {item}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                          {!isCollapsed && (
+                            <button 
+                              onClick={() => {
+                                if (confirm(`Are you sure you want to clear the timetable for Section ${cs}?`)) {
+                                  allClassSectionsList.forEach(item => {
+                                    if (item === cs) {
+                                      for (let d = 0; d < schoolConfig.daysPerWeek; d++) {
+                                        for (let p = 0; p < schoolConfig.periodsPerDay; p++) {
+                                          clearSlot(cs, d, p);
+                                        }
+                                      }
+                                    }
+                                  });
+                                }
+                              }}
+                              style={{ padding: '2px 6px', color: 'var(--google-red-error)' }}
+                              title="Clear current class timetable"
+                            >
+                              Clear Slots
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveClassSectionTable(cs)}
+                            style={{
+                              background: 'none',
+                              border: 'none',
+                              padding: '4px',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              color: 'var(--google-text-secondary)',
+                              borderRadius: '50%'
+                            }}
+                            title="Close Timetable"
+                          >
+                            <X size={14} />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Constraint status indicator */}
+                      {!isCollapsed && classRequirements && (
+                        <div style={{ 
+                          border: '1px solid var(--google-gray-border)', 
+                          borderRadius: '4px', 
+                          padding: '4px 8px', 
+                          backgroundColor: 'var(--google-gray-bg)',
+                          fontSize: '11px'
+                        }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
+                            <span style={{ fontWeight: 500 }}>Subject Requirements:</span>
+                            <span className={`status-pill ${classRequirements.totalAllocated === classRequirements.totalTarget ? 'success' : 'warn'}`}>
+                              Allocated: {classRequirements.totalAllocated} / {classRequirements.totalTarget} periods
+                            </span>
+                          </div>
+                          
+                          {/* Compact list of subjects & details */}
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                            {classRequirements.subjectsStatus.filter(s => s.isEnabled).map(s => (
+                              <span 
+                                key={s.id} 
+                                style={{ 
+                                  padding: '1px 4px', 
+                                  borderRadius: '3px',
+                                  border: '1px solid var(--google-gray-border)',
+                                  backgroundColor: s.difference === 0 ? 'var(--google-green-bg)' : (s.difference < 0 ? 'var(--google-red-bg)' : 'var(--google-gray-card)'),
+                                  color: s.difference === 0 ? 'var(--google-green-success)' : (s.difference < 0 ? 'var(--google-red-error)' : 'var(--google-text-secondary)'),
+                                  fontSize: '9px'
+                                }}
+                              >
+                                {s.name}: {s.allocated}/{s.target}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Grid table */}
+                    {!isCollapsed && (
+                      <div className="panel-grid-container">
+                        <div className="table-container">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th style={{ width: '80px' }}>Day</th>
+                                {periodsList.map((p, idx) => (
+                                  <th key={idx}>{p}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {daysList.map((day, dIdx) => (
+                                <tr key={dIdx}>
+                                  <td style={{ fontWeight: 500, backgroundColor: 'var(--google-gray-bg)' }}>{day}</td>
+                                  {periodsList.map((_, pIdx) => {
+                                    const slot = classTimetable[`${dIdx}-${pIdx}`];
+                                    const isClashing = slot && clashingSlots.has(slot.id);
+                                    const teacher = slot ? teachers.find(t => t.id === slot.teacherId) : null;
+                                    const subject = slot ? subjects.find(s => s.id === slot.subjectId) : null;
+
+                                    const suggestion = suggestedSlots?.find(s => s.classSection === cs && s.dayIndex === dIdx && s.periodIndex === pIdx);
+                                    const displaySlot = suggestion || slot;
+                                    const displayTeacher = suggestion ? teachers.find(t => t.id === suggestion.teacherId) : teacher;
+                                    const displaySubject = suggestion ? subjects.find(s => s.id === suggestion.subjectId) : subject;
+                                    const isSuggested = !!suggestion;
+
+                                    return (
+                                      <td 
+                                        key={pIdx} 
+                                        className={`timetable-cell ${isClashing ? 'clashing' : ''}`}
+                                        onClick={() => {
+                                          if (!suggestedSlots) {
+                                            setActiveCellSlot({ classSection: cs, day: dIdx, period: pIdx });
+                                          }
+                                        }}
+                                        style={isSuggested ? { border: '2px dashed var(--google-blue)', backgroundColor: 'var(--google-blue-light)' } : {}}
+                                      >
+                                        {displaySlot ? (
+                                          <div className="timetable-cell-content">
+                                            <span className="cell-teacher">{displayTeacher?.shortName || displaySlot.teacherId}</span>
+                                            <span className="cell-subject">{displaySubject?.name || displaySlot.subjectId}</span>
+                                          </div>
+                                        ) : (
+                                          <div className="timetable-cell-content" style={{ color: '#ccc' }}>+</div>
+                                        )}
+                                      </td>
+                                    );
+                                  })}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            ) : (
+              <div style={{
+                textAlign: 'center',
+                padding: '30px',
+                color: 'var(--google-text-secondary)',
+                backgroundColor: 'var(--google-gray-card)',
+                border: '1px solid var(--google-gray-border)',
+                borderRadius: '8px'
+              }}>
+                No class section timetables are currently visible. Click class buttons above to display their timetables.
+              </div>
+            )}
 
             {/* Right Panel: Teacher View */}
-            <div className="scheduler-panel" style={{ flex: 1 }}>
+            <div className="scheduler-panel">
               <div className="panel-header">
                 <div className="panel-title-row">
                   <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <button 
+                      type="button"
+                      onClick={() => setIsTeacherTimetableCollapsed(!isTeacherTimetableCollapsed)}
+                      style={{ 
+                        background: 'none', 
+                        border: 'none', 
+                        padding: '4px', 
+                        display: 'flex', 
+                        alignItems: 'center', 
+                        justifyContent: 'center',
+                        color: 'var(--google-text-secondary)',
+                        borderRadius: '50%'
+                      }}
+                      title={isTeacherTimetableCollapsed ? "Expand Teacher Timetable Visualizer" : "Collapse Teacher Timetable Visualizer"}
+                    >
+                      {isTeacherTimetableCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+                    </button>
                     <h3 style={{ fontSize: '13px', fontWeight: 500 }}>Teacher Timetable Visualizer</h3>
                     <select 
                       value={selectedTeacherId || ''} 
@@ -821,11 +1014,27 @@ export default function App() {
                         <option key={t.id} value={t.id}>{t.fullName} ({t.shortName})</option>
                       ))}
                     </select>
+                    {selectedTeacherId && !suggestedSlots && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const suggestions = autoSuggestTeacherSlots(selectedTeacherId);
+                          if (suggestions.length === 0) {
+                            alert("No suggestions could be found or the teacher's load is already met.");
+                          } else {
+                            setSuggestedSlots(suggestions);
+                          }
+                        }}
+                        style={{ marginLeft: 'auto', padding: '4px 8px', fontSize: '11px', backgroundColor: 'var(--google-blue)', color: '#fff', borderRadius: '4px', border: 'none', cursor: 'pointer' }}
+                      >
+                        Auto-Suggest Assignments
+                      </button>
+                    )}
                   </div>
                 </div>
 
                 {/* Teacher Workload info */}
-                {activeTeacherStatus && (
+                {!isTeacherTimetableCollapsed && activeTeacherStatus && (
                   <div style={{ 
                     border: '1px solid var(--google-gray-border)', 
                     borderRadius: '4px', 
@@ -844,47 +1053,56 @@ export default function App() {
               </div>
 
               {/* Grid table */}
-              <div className="panel-grid-container">
-                <div className="table-container">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th style={{ width: '80px' }}>Day</th>
-                        {periodsList.map((p, idx) => (
-                          <th key={idx}>{p}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {daysList.map((day, dIdx) => (
-                        <tr key={dIdx}>
-                          <td style={{ fontWeight: 500, backgroundColor: 'var(--google-gray-bg)' }}>{day}</td>
-                          {periodsList.map((_, pIdx) => {
-                            // Find active classes assigned to this teacher
-                            const assignedSlots = Object.values(timetable).filter(
-                              s => s.teacherId === selectedTeacherId && s.dayIndex === dIdx && s.periodIndex === pIdx
-                            );
-
-                            return (
-                              <td key={pIdx} className="timetable-cell" style={{ cursor: 'default' }}>
-                                <div className="timetable-cell-content">
-                                  {assignedSlots.length > 0 ? (
-                                    assignedSlots.map(s => (
-                                      <span key={s.id} className="cell-class">Class {s.classSection}</span>
-                                    ))
-                                  ) : (
-                                    <span style={{ color: '#ccc' }}>-</span>
-                                  )}
-                                </div>
-                              </td>
-                            );
-                          })}
+              {!isTeacherTimetableCollapsed && (
+                <div className="panel-grid-container">
+                  <div className="table-container">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th style={{ width: '80px' }}>Day</th>
+                          {periodsList.map((p, idx) => (
+                            <th key={idx}>{p}</th>
+                          ))}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {daysList.map((day, dIdx) => (
+                          <tr key={dIdx}>
+                            <td style={{ fontWeight: 500, backgroundColor: 'var(--google-gray-bg)' }}>{day}</td>
+                            {periodsList.map((_, pIdx) => {
+                              // Find active classes assigned to this teacher
+                              const assignedSlots = Object.values(timetable).filter(
+                                s => s.teacherId === selectedTeacherId && s.dayIndex === dIdx && s.periodIndex === pIdx
+                              );
+
+                              const suggestedTeacherSlots = suggestedSlots?.filter(
+                                s => s.teacherId === selectedTeacherId && s.dayIndex === dIdx && s.periodIndex === pIdx
+                              ) || [];
+
+                              const allDisplaySlots = [...assignedSlots, ...suggestedTeacherSlots];
+                              const hasSuggestions = suggestedTeacherSlots.length > 0;
+
+                              return (
+                                <td key={pIdx} className="timetable-cell" style={{ cursor: 'default', ...(hasSuggestions ? { border: '2px dashed var(--google-blue)', backgroundColor: 'var(--google-blue-light)' } : {}) }}>
+                                  <div className="timetable-cell-content">
+                                    {allDisplaySlots.length > 0 ? (
+                                      allDisplaySlots.map(s => (
+                                        <span key={s.id} className="cell-class">Class {s.classSection}</span>
+                                      ))
+                                    ) : (
+                                      <span style={{ color: '#ccc' }}>-</span>
+                                    )}
+                                  </div>
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           </div>
         )}
@@ -912,17 +1130,15 @@ export default function App() {
                       onClick={() => setSelectedPresetId(p.id)}
                     >
                       <span style={{ fontSize: '12px' }}>{p.name}</span>
-                      {p.id !== 'default' && (
-                        <button 
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (confirm('Delete this preset?')) deletePreset(p.id);
-                          }}
-                          style={{ padding: '1px 3px', border: 'none', background: 'none', color: 'var(--google-red-error)' }}
-                        >
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (confirm('Delete this preset?')) deletePreset(p.id);
+                        }}
+                        style={{ padding: '1px 3px', border: 'none', background: 'none', color: 'var(--google-red-error)' }}
+                      >
                           <Trash2 size={11} />
-                        </button>
-                      )}
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -930,6 +1146,156 @@ export default function App() {
 
               {/* Preset Configurations */}
               <div className="settings-form-pane">
+                {/* ===== SUBJECT MASTER LIST ===== */}
+                <div style={{ 
+                  border: '1px solid var(--google-gray-border)', 
+                  borderRadius: '6px', 
+                  padding: '10px', 
+                  marginBottom: '16px',
+                  backgroundColor: 'var(--google-gray-bg)'
+                }}>
+                  <h3 style={{ fontSize: '13px', fontWeight: 500, marginBottom: '8px', color: 'var(--google-blue)' }}>
+                    Subject Master List
+                  </h3>
+                  <p style={{ fontSize: '10px', color: 'var(--google-text-secondary)', marginBottom: '8px' }}>
+                    Manage all available subjects. Changes cascade to teachers, presets, and timetable slots.
+                  </p>
+
+                  {/* Subject list */}
+                  <div style={{ 
+                    maxHeight: '200px', 
+                    overflowY: 'auto', 
+                    border: '1px solid var(--google-gray-border)', 
+                    borderRadius: '4px',
+                    backgroundColor: 'var(--google-gray-card)',
+                    marginBottom: '8px'
+                  }}>
+                    {subjects.map(sub => (
+                      <div 
+                        key={sub.id} 
+                        style={{ 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          justifyContent: 'space-between',
+                          padding: '4px 8px', 
+                          borderBottom: '1px solid var(--google-gray-border)',
+                          fontSize: '11px'
+                        }}
+                      >
+                        {editingSubjectId === sub.id ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flex: 1 }}>
+                            <input
+                              type="text"
+                              value={editingSubjectName}
+                              onChange={e => setEditingSubjectName(e.target.value)}
+                              onKeyDown={async (e) => {
+                                if (e.key === 'Enter') {
+                                  const result = await updateSubject(sub.id, editingSubjectName);
+                                  if (result.success) {
+                                    setEditingSubjectId(null);
+                                  } else {
+                                    alert(result.error);
+                                  }
+                                } else if (e.key === 'Escape') {
+                                  setEditingSubjectId(null);
+                                }
+                              }}
+                              autoFocus
+                              style={{ flex: 1, padding: '2px 4px', fontSize: '11px' }}
+                            />
+                            <button
+                              onClick={async () => {
+                                const result = await updateSubject(sub.id, editingSubjectName);
+                                if (result.success) {
+                                  setEditingSubjectId(null);
+                                } else {
+                                  alert(result.error);
+                                }
+                              }}
+                              style={{ padding: '1px 3px', border: 'none', background: 'none', color: 'var(--google-green-success)' }}
+                              title="Save"
+                            >
+                              <Check size={11} />
+                            </button>
+                            <button
+                              onClick={() => setEditingSubjectId(null)}
+                              style={{ padding: '1px 3px', border: 'none', background: 'none', color: 'var(--google-text-secondary)' }}
+                              title="Cancel"
+                            >
+                              <X size={11} />
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <span>{sub.name}</span>
+                            <div style={{ display: 'flex', gap: '2px' }}>
+                              <button
+                                onClick={() => {
+                                  setEditingSubjectId(sub.id);
+                                  setEditingSubjectName(sub.name);
+                                }}
+                                style={{ padding: '1px 3px', border: 'none', background: 'none', color: 'var(--google-text-secondary)' }}
+                                title="Rename subject"
+                              >
+                                <Pencil size={10} />
+                              </button>
+                              <button
+                                onClick={() => setDeleteSubjectConfirm(sub.id)}
+                                style={{ padding: '1px 3px', border: 'none', background: 'none', color: 'var(--google-red-error)' }}
+                                title="Delete subject"
+                              >
+                                <Trash2 size={10} />
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                    {subjects.length === 0 && (
+                      <div style={{ padding: '8px', fontSize: '11px', color: 'var(--google-text-secondary)', textAlign: 'center' }}>
+                        No subjects configured.
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Add new subject row */}
+                  <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                    <input
+                      type="text"
+                      value={newSubjectName}
+                      onChange={e => setNewSubjectName(e.target.value)}
+                      onKeyDown={async (e) => {
+                        if (e.key === 'Enter' && newSubjectName.trim()) {
+                          const result = await addSubject(newSubjectName);
+                          if (result.success) {
+                            setNewSubjectName('');
+                          } else {
+                            alert(result.error);
+                          }
+                        }
+                      }}
+                      placeholder="New subject name..."
+                      style={{ flex: 1, padding: '4px 6px', fontSize: '11px' }}
+                    />
+                    <button
+                      onClick={async () => {
+                        if (!newSubjectName.trim()) return;
+                        const result = await addSubject(newSubjectName);
+                        if (result.success) {
+                          setNewSubjectName('');
+                        } else {
+                          alert(result.error);
+                        }
+                      }}
+                      disabled={!newSubjectName.trim()}
+                      style={{ padding: '3px 8px', fontSize: '11px' }}
+                    >
+                      <Plus size={11} style={{ marginRight: '2px' }} /> Add
+                    </button>
+                  </div>
+                </div>
+
+                {/* ===== PRESET CONFIGURATION (existing, now editable for all) ===== */}
                 <h3 style={{ fontSize: '13px', fontWeight: 500, marginBottom: '10px', color: 'var(--google-blue)' }}>
                   {selectedPresetId === 'new' ? 'Create Preset' : 'Edit Preset'}
                 </h3>
@@ -940,7 +1306,6 @@ export default function App() {
                     type="text" 
                     value={presetName} 
                     onChange={e => setPresetName(e.target.value)} 
-                    disabled={selectedPresetId === 'default'}
                   />
                 </div>
 
@@ -964,7 +1329,6 @@ export default function App() {
                               <input 
                                 type="checkbox" 
                                 checked={isChecked} 
-                                disabled={selectedPresetId === 'default'}
                                 onChange={(e) => {
                                   if (e.target.checked) {
                                     setPresetEnabledSubjects([...presetEnabledSubjects, sub.id]);
@@ -981,7 +1345,7 @@ export default function App() {
                                 min="0" 
                                 max={targetSlotsTotal} 
                                 value={count} 
-                                disabled={!isChecked || selectedPresetId === 'default'}
+                                disabled={!isChecked}
                                 style={{ width: '60px', padding: '2px' }}
                                 onChange={(e) => {
                                   const val = parseInt(e.target.value) || 0;
@@ -1005,9 +1369,14 @@ export default function App() {
                     Total Preset Periods: {presetTotalPeriodsSum} / {targetSlotsTotal}
                   </span>
                   
-                  {selectedPresetId !== 'default' && (
+                  {selectedPresetId !== 'new' && (
                     <button className="primary" onClick={handleSavePreset}>
                       <Save size={12} style={{ marginRight: '4px' }} /> Save Preset
+                    </button>
+                  )}
+                  {selectedPresetId === 'new' && (
+                    <button className="primary" onClick={handleSavePreset}>
+                      <Save size={12} style={{ marginRight: '4px' }} /> Create Preset
                     </button>
                   )}
                 </div>
@@ -1162,7 +1531,7 @@ export default function App() {
                     <label>Short Name (Table display)</label>
                     <input 
                       type="text" 
-                      maxLength={5} 
+                      maxLength={10} 
                       placeholder="e.g. MRA" 
                       value={tShortName} 
                       onChange={e => setTShortName(e.target.value)} 
@@ -1401,11 +1770,11 @@ export default function App() {
           <div ref={popoverRef} className="dialog-content">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
               <span style={{ fontSize: '12px', fontWeight: 500 }}>
-                Assign Teacher ({daysList[activeCellSlot.day]}, Period {activeCellSlot.period + 1})
+                Assign Teacher ({daysList[activeCellSlot.day]}, Period {activeCellSlot.period + 1} - Class {activeCellSlot.classSection})
               </span>
               <button 
                 onClick={() => {
-                  clearSlot(selectedClassSection!, activeCellSlot.day, activeCellSlot.period);
+                  clearSlot(activeCellSlot.classSection, activeCellSlot.day, activeCellSlot.period);
                   setActiveCellSlot(null);
                 }}
                 style={{ padding: '2px 6px', color: 'var(--google-red-error)', border: 'none', background: 'none' }}
@@ -1415,8 +1784,8 @@ export default function App() {
             </div>
 
             <div style={{ maxHeight: '200px', overflowY: 'auto', border: '1px solid var(--google-gray-border)', borderRadius: '4px' }}>
-              {getEligibleTeachersForCell(activeCellSlot.day, activeCellSlot.period).length > 0 ? (
-                getEligibleTeachersForCell(activeCellSlot.day, activeCellSlot.period).map(t => (
+              {getEligibleTeachersForCell(activeCellSlot.classSection, activeCellSlot.day, activeCellSlot.period).length > 0 ? (
+                getEligibleTeachersForCell(activeCellSlot.classSection, activeCellSlot.day, activeCellSlot.period).map(t => (
                   <div 
                     key={t.id} 
                     style={{ 
@@ -1435,7 +1804,7 @@ export default function App() {
                         return;
                       }
                       assignTeacherToSlot(
-                        selectedClassSection!, 
+                        activeCellSlot.classSection, 
                         activeCellSlot.day, 
                         activeCellSlot.period, 
                         t.id
@@ -1458,7 +1827,7 @@ export default function App() {
                 ))
               ) : (
                 <div style={{ padding: '8px', fontSize: '11px', color: 'var(--google-text-secondary)', textAlign: 'center' }}>
-                  No eligible teachers found for this section. Configure teachers to teach subjects required by Class {selectedClassSection}.
+                  No eligible teachers found for this section. Configure teachers to teach subjects required by Class {activeCellSlot.classSection}.
                 </div>
               )}
             </div>
@@ -1469,6 +1838,83 @@ export default function App() {
           </div>
         </div>
       )}
+      {/* Subject Delete Confirmation Dialog */}
+      {deleteSubjectConfirm && (() => {
+        const subjectToDelete = subjects.find(s => s.id === deleteSubjectConfirm);
+        const impact = getDeleteSubjectImpact(deleteSubjectConfirm);
+        const hasImpact = impact.affectedTeachers.length > 0 || impact.affectedPresets.length > 0 || impact.affectedSlots > 0 || impact.affectedSections.length > 0;
+        return (
+          <div className="dialog-overlay">
+            <div className="dialog-content" style={{ maxWidth: '420px' }}>
+              <h3 style={{ fontSize: '13px', fontWeight: 500, marginBottom: '8px', color: 'var(--google-red-error)' }}>
+                Delete Subject: "{subjectToDelete?.name}"
+              </h3>
+              
+              {hasImpact ? (
+                <div style={{ fontSize: '11px', marginBottom: '10px' }}>
+                  <p style={{ color: 'var(--google-text-secondary)', marginBottom: '6px' }}>
+                    This will cascade the following changes:
+                  </p>
+                  <div style={{ 
+                    border: '1px solid var(--google-gray-border)', 
+                    borderRadius: '4px', 
+                    padding: '8px',
+                    backgroundColor: 'var(--google-red-bg)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '4px'
+                  }}>
+                    {impact.affectedTeachers.length > 0 && (
+                      <div>
+                        <strong>Teachers ({impact.affectedTeachers.length}):</strong>{' '}
+                        {impact.affectedTeachers.join(', ')}
+                        <br /><span style={{ color: 'var(--google-text-secondary)' }}>→ Subject removed from their qualification list</span>
+                      </div>
+                    )}
+                    {impact.affectedPresets.length > 0 && (
+                      <div>
+                        <strong>Presets ({impact.affectedPresets.length}):</strong>{' '}
+                        {impact.affectedPresets.join(', ')}
+                        <br /><span style={{ color: 'var(--google-text-secondary)' }}>→ Subject removed from allocation table</span>
+                      </div>
+                    )}
+                    {impact.affectedSections.length > 0 && (
+                      <div>
+                        <strong>Sections ({impact.affectedSections.length}):</strong>{' '}
+                        {impact.affectedSections.join(', ')}
+                        <br /><span style={{ color: 'var(--google-text-secondary)' }}>→ Subject removed from requirements</span>
+                      </div>
+                    )}
+                    {impact.affectedSlots > 0 && (
+                      <div>
+                        <strong>Timetable slots ({impact.affectedSlots}):</strong>
+                        <br /><span style={{ color: 'var(--google-text-secondary)' }}>→ All slots with this subject will be cleared</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <p style={{ fontSize: '11px', color: 'var(--google-text-secondary)', marginBottom: '10px' }}>
+                  This subject is not used by any teachers, presets, or timetable slots. It can be safely removed.
+                </p>
+              )}
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '6px' }}>
+                <button onClick={() => setDeleteSubjectConfirm(null)}>Cancel</button>
+                <button
+                  onClick={async () => {
+                    await deleteSubject(deleteSubjectConfirm);
+                    setDeleteSubjectConfirm(null);
+                  }}
+                  style={{ backgroundColor: 'var(--google-red-bg)', color: 'var(--google-red-error)', borderColor: 'var(--google-red-error)' }}
+                >
+                  <Trash2 size={11} style={{ marginRight: '4px' }} /> Delete Subject
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </>
   );
 }
